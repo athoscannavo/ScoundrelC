@@ -1,344 +1,546 @@
-/*
- * Scoundrel - jogo de cartas solitario em C (padrao C99)
- * Compilar:  gcc -std=c99 -Wall -Wextra -pedantic -o scoundrel scoundrel.c
- * Executar:  ./scoundrel   (Windows: scoundrel.exe)
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
 
-#define VIDA_MAXIMA    20
-#define TOTAL_CARTAS   44
-#define TAMANHO_SALA   4
-#define SEM_LIMITE     99   /* arma nova: pode atacar qualquer monstro */
+#define VIDA_MAXIMA          20
+#define TOTAL_CARTAS         52
+#define TAMANHO_SALA         4
+#define SEM_LIMITE_MONSTRO   99
 
-typedef enum { MONSTRO, ARMA, POCAO } TipoCarta;
-typedef enum { PAUS, ESPADAS, COPAS, OUROS } Naipe;
+#define TIPO_MONSTRO         0
+#define TIPO_ARMA            1
+#define TIPO_POCAO           2
 
-typedef struct {
-    Naipe naipe;
-    TipoCarta tipo;
+#define NAIPE_PAUS           0
+#define NAIPE_ESPADAS        1
+#define NAIPE_COPAS          2
+#define NAIPE_OUROS          3
+
+struct Carta {
+    int naipe;
+    int tipo;
     int valor;
-} Carta;
+};
 
-typedef struct {
+struct Jogador {
     int vida;
     int arma_equipada;
-    int ultimo_monstro_morto;
-    int pocao_usada_no_turno;
-    Carta ultima_carta_jogada;
-} Jogador;
+    int ultimo_monstro_derrotado;
+    int usou_pocao_no_turno;
+    struct Carta ultima_carta_jogada;
+};
 
-static const char *obter_nome_naipe(Naipe naipe) {
-    switch (naipe) {
-        case PAUS:    return "Paus (M)";
-        case ESPADAS: return "Espadas (M)";
-        case COPAS:   return "Copas (P)";
-        case OUROS:   return "Ouros (A)";
-        default:      return "?";
-    }
-}
+void exibir_instrucoes(void);
+const char *obter_nome_naipe(int naipe);
+void imprimir_carta(struct Carta carta);
+char ler_opcao_teclado(const char *mensagem);
+int criar_baralho(struct Carta *masmorra);
+void embaralhar_baralho(struct Carta *masmorra, int total_cartas);
+void exibir_estado_e_sala(struct Jogador jogador, struct Carta *sala,
+                          int *espaco_ocupado, int cartas_na_masmorra,
+                          int cartas_descartadas);
+void enfrentar_monstro(struct Jogador *jogador, struct Carta monstro,
+                       int *abandonou_partida);
+int calcular_pontuacao_derrota(struct Jogador jogador,
+                               struct Carta *masmorra,
+                               int cartas_na_masmorra,
+                               struct Carta *sala,
+                               int *espaco_ocupado);
+void jogar_partida(void);
 
-static void imprimir_carta(Carta c) {
-    printf("[ ");
-    if (c.valor <= 10)       printf("%d", c.valor);
-    else if (c.valor == 11)  printf("J");
-    else if (c.valor == 12)  printf("Q");
-    else if (c.valor == 13)  printf("K");
-    else                     printf("A");
-    printf(" de %s ]", obter_nome_naipe(c.naipe));
-}
-
-/* Le uma linha e devolve o primeiro caractere em minusculo.
- * Devolve '\0' em caso de EOF (Ctrl+D / Ctrl+Z / entrada encerrada). */
-static char ler_entrada(const char *mensagem) {
-    char buffer[64];
-    printf("%s", mensagem);
-    fflush(stdout);
-
-    if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
-        return '\0';
-    }
-
-    /* Se a linha foi maior que o buffer, descarta o resto para nao
-     * contaminar a proxima leitura. */
-    if (strchr(buffer, '\n') == NULL) {
-        int ch;
-        while ((ch = getchar()) != '\n' && ch != EOF) { }
-    }
-
-    return (char)tolower((unsigned char)buffer[0]);
-}
-
-static int criar_baralho(Carta masmorra[]) {
-    int total = 0;
-
-    /* Monstros: Paus e Espadas, 2..14 (A = 14) -> 26 cartas */
-    for (int naipe = PAUS; naipe <= ESPADAS; naipe++) {
-        for (int valor = 2; valor <= 14; valor++) {
-            masmorra[total].naipe = (Naipe)naipe;
-            masmorra[total].tipo  = MONSTRO;
-            masmorra[total].valor = valor;
-            total++;
-        }
-    }
-    /* Pocoes: Copas 2..10 -> 9 cartas */
-    for (int valor = 2; valor <= 10; valor++) {
-        masmorra[total].naipe = COPAS;
-        masmorra[total].tipo  = POCAO;
-        masmorra[total].valor = valor;
-        total++;
-    }
-    /* Armas: Ouros 2..10 -> 9 cartas */
-    for (int valor = 2; valor <= 10; valor++) {
-        masmorra[total].naipe = OUROS;
-        masmorra[total].tipo  = ARMA;
-        masmorra[total].valor = valor;
-        total++;
-    }
-    return total;
-}
-
-static void embaralhar_baralho(Carta masmorra[], int total) {
-    for (int i = total - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        Carta temp = masmorra[i];
-        masmorra[i] = masmorra[j];
-        masmorra[j] = temp;
-    }
-}
-
-static void executar_partida(void) {
-    Carta masmorra[TOTAL_CARTAS];
-    Carta sala[TAMANHO_SALA];
-    Carta escolhida;
-    Jogador jogador = { .vida = VIDA_MAXIMA, .ultimo_monstro_morto = SEM_LIMITE };
-
-    int qtd_masmorra;
-    int qtd_sala = 0;          /* quantidade de espacos ocupados na sala */
-    int ocupada[TAMANHO_SALA] = {0};  /* 1 = espaco com carta, 0 = vazio */
-    int qtd_descarte = 0;      /* so contagem: o descarte nao e reutilizado */
-    int cartas_enfrentadas = 0;
-    int pode_pular = 1;
-    int indice, pontuacao_final;
-    char escolha;
-
-    qtd_masmorra = criar_baralho(masmorra);
-    embaralhar_baralho(masmorra, qtd_masmorra);
-
-    printf("\n=========================================\n");
-    printf("   INICIANDO NOVA PARTIDA DE SCOUNDREL   \n");
-    printf("=========================================\n");
-    printf("(Pressione 'x' a qualquer momento para voltar ao Menu)\n\n");
-
-    while (jogador.vida > 0) {
-        /* A sala so e reabastecida no inicio de um turno (partida nova,
-         * depois de 3 cartas enfrentadas ou depois de pular a sala).
-         * Apenas os espacos vazios recebem cartas novas; a carta que
-         * sobrou do turno anterior permanece onde estava.
-         * (topo do baralho = ultimo indice) */
-        if (cartas_enfrentadas == 0) {
-            for (int i = 0; i < TAMANHO_SALA && qtd_masmorra > 0; i++) {
-                if (!ocupada[i]) {
-                    sala[i] = masmorra[--qtd_masmorra];
-                    ocupada[i] = 1;
-                    qtd_sala++;
-                }
-            }
-        }
-
-        /* Vitoria */
-        if (qtd_sala == 0 && qtd_masmorra == 0) {
-            printf("\n*** PARABENS! VOCE COMPLETOU A MASMORRA! ***\n");
-            pontuacao_final = jogador.vida;
-            if (jogador.vida == VIDA_MAXIMA &&
-                jogador.ultima_carta_jogada.tipo == POCAO) {
-                pontuacao_final += jogador.ultima_carta_jogada.valor;
-            }
-            printf("Pontuacao final: %d\n\n", pontuacao_final);
-            return;
-        }
-
-        /* Maior monstro atacavel com a arma: estritamente menor que o ultimo morto */
-        printf("\n-----------------------------------------\n");
-        printf("VIDA: %d/%d | ARMA: %d (Max Monstro: %d)\n",
-               jogador.vida, VIDA_MAXIMA, jogador.arma_equipada,
-               (jogador.ultimo_monstro_morto == SEM_LIMITE
-                    ? 14 : jogador.ultimo_monstro_morto - 1));
-        printf("Cartas na Masmorra: %d | Descarte: %d\n", qtd_masmorra, qtd_descarte);
-        printf("-----------------------------------------\n");
-        printf("SALA ATUAL:\n");
-        for (int i = 0; i < TAMANHO_SALA; i++) {
-            printf(" [%d] ", i + 1);
-            if (ocupada[i]) {
-                imprimir_carta(sala[i]);
-            } else {
-                printf("(vazio)");
-            }
-            printf("\n");
-        }
-
-        printf("\nOpcoes:\n");
-        printf(" (1-%d) Enfrentar carta (espacos marcados como vazio nao tem carta)\n",
-               TAMANHO_SALA);
-        if (pode_pular && cartas_enfrentadas == 0 && qtd_sala == TAMANHO_SALA) {
-            printf(" (f) Pular sala (Skip Room)\n");
-        }
-        printf(" (x) Abandonar e voltar ao Menu\n");
-
-        escolha = ler_entrada("\nSua escolha: ");
-
-        if (escolha == 'x' || escolha == '\0') {
-            printf("\nPartida abandonada.\n\n");
-            return;
-        }
-
-        /* Pular sala: as 4 cartas vao para o fundo (indice 0) do baralho */
-        if (escolha == 'f' && pode_pular && cartas_enfrentadas == 0 &&
-            qtd_sala == TAMANHO_SALA) {
-            printf("\nVoce pulou a sala! As cartas voltam para o fundo da Masmorra.\n");
-            memmove(&masmorra[qtd_sala], &masmorra[0],
-                    (size_t)qtd_masmorra * sizeof(Carta));
-            memcpy(&masmorra[0], sala, (size_t)qtd_sala * sizeof(Carta));
-            qtd_masmorra += qtd_sala;
-            for (int i = 0; i < TAMANHO_SALA; i++) ocupada[i] = 0;
-            qtd_sala = 0;
-            pode_pular = 0;
-            continue;
-        }
-
-        /* 'f' chegou aqui: pular a sala nao e permitido neste momento */
-        if (escolha == 'f') {
-            if (!pode_pular) {
-                printf("\nVoce nao pode pular duas salas seguidas!\n");
-            } else {
-                printf("\nSo e possivel pular a sala antes de enfrentar qualquer carta.\n");
-            }
-            continue;
-        }
-
-        indice = escolha - '1';
-        if (indice < 0 || indice >= TAMANHO_SALA) {
-            printf("\nOpcao invalida! Tente novamente.\n");
-            continue;
-        }
-        if (!ocupada[indice]) {
-            printf("\nO espaco %d esta vazio! Escolha outra carta.\n", indice + 1);
-            continue;
-        }
-
-        escolhida = sala[indice];
-        jogador.ultima_carta_jogada = escolhida;
-
-        if (escolhida.tipo == POCAO) {
-            if (!jogador.pocao_usada_no_turno) {
-                int vida_antes = jogador.vida;
-                jogador.vida += escolhida.valor;
-                if (jogador.vida > VIDA_MAXIMA) jogador.vida = VIDA_MAXIMA;
-                jogador.pocao_usada_no_turno = 1;
-                printf("\nPocao usada! Curou %d. Vida atual: %d\n",
-                       jogador.vida - vida_antes, jogador.vida);
-            } else {
-                printf("\nVoce ja usou uma pocao neste turno! Esta foi descartada e curou 0. Vida atual: %d\n",
-                       jogador.vida);
-            }
-            qtd_descarte++;
-        }
-        else if (escolhida.tipo == ARMA) {
-            jogador.arma_equipada = escolhida.valor;
-            jogador.ultimo_monstro_morto = SEM_LIMITE;
-            printf("\nNova arma equipada! Poder: %d\n", jogador.arma_equipada);
-            qtd_descarte++;
-        }
-        else { /* MONSTRO */
-            /* A arma so derrota monstros de valor ESTRITAMENTE MENOR que o
-             * ultimo monstro que ela matou. */
-            int pode_usar_arma = (jogador.arma_equipada > 0) &&
-                                 (escolhida.valor < jogador.ultimo_monstro_morto);
-            int dano_com_arma = escolhida.valor - jogador.arma_equipada;
-            int usar_arma = 0;
-
-            if (dano_com_arma < 0) dano_com_arma = 0;
-
-            if (pode_usar_arma) {
-                printf("\nMonstro selecionado (%d de dano).\n", escolhida.valor);
-                printf("1. Lutar com Maos Limpas (Recebe %d de dano)\n", escolhida.valor);
-                printf("2. Usar Arma Equipada (Recebe %d de dano)\n", dano_com_arma);
-
-                char c = ler_entrada("Escolha o combate (1-2): ");
-                if (c == 'x' || c == '\0') {
-                    printf("\nPartida abandonada.\n\n");
-                    return;
-                }
-                if (c == '2') usar_arma = 1;
-            }
-
-            if (usar_arma) {
-                jogador.vida -= dano_com_arma;
-                jogador.ultimo_monstro_morto = escolhida.valor;
-                printf("\nUsou a arma e recebeu %d de dano!\n", dano_com_arma);
-            } else {
-                jogador.vida -= escolhida.valor;
-                printf("\nLuta com maos limpas! Recebeu %d de dano!\n", escolhida.valor);
-            }
-            qtd_descarte++;
-        }
-
-        /* Esvazia o espaco da carta escolhida (as demais nao se movem) */
-        ocupada[indice] = 0;
-        qtd_sala--;
-        cartas_enfrentadas++;
-
-        if (cartas_enfrentadas == 3) {
-            cartas_enfrentadas = 0;
-            jogador.pocao_usada_no_turno = 0;
-            pode_pular = 1;
-            printf("\nTurno concluido! A carta restante segue para a proxima sala.\n");
-        }
-    }
-
-    /* Derrota */
-    printf("\n=========================================\n");
-    printf("               VOCE MORREU!              \n");
-    printf("=========================================\n");
-
-    int soma_monstros = 0;
-    for (int i = 0; i < qtd_masmorra; i++) {
-        if (masmorra[i].tipo == MONSTRO) soma_monstros += masmorra[i].valor;
-    }
-    for (int i = 0; i < TAMANHO_SALA; i++) {
-        if (ocupada[i] && sala[i].tipo == MONSTRO) soma_monstros += sala[i].valor;
-    }
-
-    pontuacao_final = jogador.vida - soma_monstros;
-    printf("Pontuacao Final: %d\n\n", pontuacao_final);
-}
-
+/*
+ * Funcao: main
+ * Uso: Ponto de entrada do programa. Inicializa o gerador de numeros aleatorios,
+ *      apresenta as instrucoes iniciais e gerencia o loop do menu principal.
+ */
 int main(void) {
-    char opcao;
+    char opcao_menu;
+
     srand((unsigned int)time(NULL));
+    exibir_instrucoes();
 
-    for (;;) {
-        printf("=========================================\n");
-        printf("           SCOUNDREL - C RPG             \n");
-        printf("=========================================\n");
+    while (1) {
+        printf("=========================================================\n");
+        printf("                 SCOUNDREL - JOGO DE CARTAS              \n");
+        printf("=========================================================\n");
         printf("1. Jogar\n");
-        printf("2. Sair\n");
+        printf("2. Ver Instrucoes\n");
+        printf("3. Sair\n");
 
-        opcao = ler_entrada("Escolha uma opcao: ");
+        opcao_menu = ler_opcao_teclado("Escolha uma opcao: ");
 
-        if (opcao == '1') {
-            executar_partida();
-        } else if (opcao == '2' || opcao == '\0') {
+        if (opcao_menu == '1') {
+            jogar_partida();
+        } else if (opcao_menu == '2') {
+            exibir_instrucoes();
+        } else if (opcao_menu == '3' || opcao_menu == '\0') {
             printf("\nSaindo do jogo... Ate logo!\n");
             break;
         } else {
-            printf("\nOpcao invalida. Digite 1 ou 2.\n\n");
+            printf("\nOpcao invalida. Digite 1, 2 ou 3.\n\n");
         }
     }
 
     return 0;
+}
+
+/*
+ * Funcao: exibir_instrucoes
+ * Uso: Imprime no terminal o objetivo, o significado de cada naipe/tipo de carta
+ *      e as regras basicas de movimentacao e fuga do jogo Scoundrel.
+ */
+void exibir_instrucoes(void) {
+    printf("\n=========================================================\n");
+    printf("               SOBRE O JOGO - SCOUNDREL                  \n");
+    printf("=========================================================\n");
+    printf("OBJETIVO:\n");
+    printf("  Sobreviver e limpar todas as %d cartas da masmorra sem\n", TOTAL_CARTAS);
+    printf("  deixar sua vida chegar a zero (vida maxima: %d).\n\n", VIDA_MAXIMA);
+    printf("AS CARTAS:\n");
+    printf("  - Paus e Espadas (2 a As): MONSTROS. Causam dano igual\n");
+    printf("    ao seu valor (Valete=11, Dama=12, Rei=13, As=14).\n");
+    printf("  - Ouros (2 a As): ARMAS. Reduzem o dano dos monstros.\n");
+    printf("    Regra da arma: apos derrotar um monstro, ela so pode\n");
+    printf("    atacar monstros mais fracos que o ultimo derrotado.\n");
+    printf("  - Copas (2 a As): POCOES. Recuperam pontos de vida.\n");
+    printf("    Apenas 1 pocao faz efeito por turno; outras sao\n");
+    printf("    descartadas sem curar.\n\n");
+    printf("COMO JOGAR:\n");
+    printf("  - Cada sala mostra 4 cartas. Enfrente 3 delas; a 4a\n");
+    printf("    carta permanece para formar a proxima sala.\n");
+    printf("  - Voce pode fugir/pular uma sala inteira antes de\n");
+    printf("    escolher cartas, mas nunca duas vezes seguidas.\n");
+    printf("=========================================================\n\n");
+}
+
+/*
+ * Funcao: obter_nome_naipe
+ * Uso: Recebe o identificador numerico de um naipe e retorna uma string constante
+ *      descrevendo o naipe e sua respectiva funcao no jogo (Monstro, Pocao ou Arma).
+ */
+const char *obter_nome_naipe(int naipe) {
+    switch (naipe) {
+        case NAIPE_PAUS:    return "Paus (Monstro)";
+        case NAIPE_ESPADAS: return "Espadas (Monstro)";
+        case NAIPE_COPAS:   return "Copas (Pocao)";
+        case NAIPE_OUROS:   return "Ouros (Arma)";
+        default:            return "?";
+    }
+}
+
+/*
+ * Funcao: imprimir_carta
+ * Uso: Exibe uma carta formatada no terminal, convertendo valores de 11 a 14
+ *      nas figuras correspondentes (J, Q, K, A) acompanhadas de seu naipe.
+ */
+void imprimir_carta(struct Carta carta) {
+    printf("[ ");
+    if (carta.valor <= 10)       printf("%d", carta.valor);
+    else if (carta.valor == 11)  printf("J");
+    else if (carta.valor == 12)  printf("Q");
+    else if (carta.valor == 13)  printf("K");
+    else                         printf("A");
+    printf(" de %s ]", obter_nome_naipe(carta.naipe));
+}
+
+/*
+ * Funcao: ler_opcao_teclado
+ * Uso: Exibe um prompt ao usuario, le a entrada padrao com seguranca usando fgets,
+ *      descarta caracteres excedentes no buffer e retorna o primeiro caractere em minusculo.
+ */
+char ler_opcao_teclado(const char *mensagem) {
+    char texto_digitado[64];
+    int caractere_extra;
+
+    printf("%s", mensagem);
+    fflush(stdout);
+
+    if (fgets(texto_digitado, sizeof(texto_digitado), stdin) == NULL) {
+        return '\0';
+    }
+
+    if (strchr(texto_digitado, '\n') == NULL) {
+        while ((caractere_extra = getchar()) != '\n' && caractere_extra != EOF) { }
+    }
+
+    return (char)tolower((unsigned char)texto_digitado[0]);
+}
+
+/*
+ * Funcao: criar_baralho
+ * Uso: Preenche o vetor da masmorra com as 52 cartas padrao (26 monstros de Paus/Espadas,
+ *      13 pocoes de Copas e 13 armas de Ouros, de 2 a 14) e retorna o total criado.
+ */
+int criar_baralho(struct Carta *masmorra) {
+    int total_criado;
+    int naipe_atual;
+    int valor_atual;
+
+    total_criado = 0;
+
+    for (naipe_atual = NAIPE_PAUS; naipe_atual <= NAIPE_ESPADAS; naipe_atual++) {
+        for (valor_atual = 2; valor_atual <= 14; valor_atual++) {
+            masmorra[total_criado].naipe = naipe_atual;
+            masmorra[total_criado].tipo  = TIPO_MONSTRO;
+            masmorra[total_criado].valor = valor_atual;
+            total_criado++;
+        }
+    }
+
+    for (valor_atual = 2; valor_atual <= 14; valor_atual++) {
+        masmorra[total_criado].naipe = NAIPE_COPAS;
+        masmorra[total_criado].tipo  = TIPO_POCAO;
+        masmorra[total_criado].valor = valor_atual;
+        total_criado++;
+    }
+
+    for (valor_atual = 2; valor_atual <= 14; valor_atual++) {
+        masmorra[total_criado].naipe = NAIPE_OUROS;
+        masmorra[total_criado].tipo  = TIPO_ARMA;
+        masmorra[total_criado].valor = valor_atual;
+        total_criado++;
+    }
+
+    return total_criado;
+}
+
+/*
+ * Funcao: embaralhar_baralho
+ * Uso: Randomiza a ordem das cartas no vetor da masmorra utilizando o algoritmo
+ *      de embaralhamento Fisher-Yates.
+ */
+void embaralhar_baralho(struct Carta *masmorra, int total_cartas) {
+    int indice_atual;
+    int indice_sorteado;
+    struct Carta carta_temporaria;
+
+    for (indice_atual = total_cartas - 1; indice_atual > 0; indice_atual--) {
+        indice_sorteado = rand() % (indice_atual + 1);
+        carta_temporaria = masmorra[indice_atual];
+        masmorra[indice_atual] = masmorra[indice_sorteado];
+        masmorra[indice_sorteado] = carta_temporaria;
+    }
+}
+
+/*
+ * Funcao: exibir_estado_e_sala
+ * Uso: Apresenta o painel de status atual do jogador (vida, arma equipada, limite de ataque
+ *      da arma, contagem de cartas) e lista os 4 espacos da sala atual.
+ */
+void exibir_estado_e_sala(struct Jogador jogador, struct Carta *sala,
+                          int *espaco_ocupado, int cartas_na_masmorra,
+                          int cartas_descartadas) {
+    int limite_monstro_arma;
+    int i;
+
+    if (jogador.ultimo_monstro_derrotado == SEM_LIMITE_MONSTRO) {
+        limite_monstro_arma = 14;
+    } else {
+        limite_monstro_arma = jogador.ultimo_monstro_derrotado - 1;
+    }
+
+    printf("\n---------------------------------------------------------\n");
+    printf("VIDA: %d/%d | ARMA EQUIPADA: %d (Ataca monstro ate: %d)\n",
+           jogador.vida, VIDA_MAXIMA, jogador.arma_equipada, limite_monstro_arma);
+    printf("Cartas restantes na Masmorra: %d | Descartadas: %d\n",
+           cartas_na_masmorra, cartas_descartadas);
+    printf("---------------------------------------------------------\n");
+    printf("CARTAS NA SALA ATUAL:\n");
+
+    for (i = 0; i < TAMANHO_SALA; i++) {
+        printf(" [%d] ", i + 1);
+        if (espaco_ocupado[i]) {
+            imprimir_carta(sala[i]);
+        } else {
+            printf("(espaco vazio)");
+        }
+        printf("\n");
+    }
+}
+
+/*
+ * Funcao: enfrentar_monstro
+ * Uso: Gerencia o combate contra uma carta de monstro, verificando se a arma equipada
+ *      pode ser utilizada, perguntando a escolha do jogador quando aplicavel e atualizando
+ *      sua vida, o historico da arma ou o indicador de abandono da partida.
+ */
+void enfrentar_monstro(struct Jogador *jogador, struct Carta monstro,
+                       int *abandonou_partida) {
+    int pode_usar_arma;
+    int dano_usando_arma;
+    int escolheu_usar_arma;
+    char escolha_combate;
+
+    pode_usar_arma = (jogador->arma_equipada > 0) &&
+                     (monstro.valor < jogador->ultimo_monstro_derrotado);
+    dano_usando_arma = monstro.valor - jogador->arma_equipada;
+    escolheu_usar_arma = 0;
+
+    if (dano_usando_arma < 0) {
+        dano_usando_arma = 0;
+    }
+
+    if (pode_usar_arma) {
+        printf("\nMonstro encontrado (Forca: %d).\n", monstro.valor);
+        printf(" 1. Lutar desarmado (Recebe %d de dano)\n", monstro.valor);
+        printf(" 2. Usar arma equipada (Recebe %d de dano)\n", dano_usando_arma);
+
+        escolha_combate = ler_opcao_teclado("Escolha como lutar (1 ou 2): ");
+        if (escolha_combate == 'x' || escolha_combate == '\0') {
+            *abandonou_partida = 1;
+            return;
+        }
+        if (escolha_combate == '2') {
+            escolheu_usar_arma = 1;
+        }
+    }
+
+    if (escolheu_usar_arma) {
+        jogador->vida -= dano_usando_arma;
+        jogador->ultimo_monstro_derrotado = monstro.valor;
+        printf("\nVoce atacou com a arma e recebeu %d de dano!\n", dano_usando_arma);
+    } else {
+        jogador->vida -= monstro.valor;
+        printf("\nVoce lutou desarmado e recebeu %d de dano!\n", monstro.valor);
+    }
+}
+
+/*
+ * Funcao: calcular_pontuacao_derrota
+ * Uso: Calcula a pontuacao negativa em caso de derrota subtraindo da vida atual
+ *      do jogador a soma dos valores de todos os monstros restantes na masmorra e na sala.
+ */
+int calcular_pontuacao_derrota(struct Jogador jogador,
+                               struct Carta *masmorra,
+                               int cartas_na_masmorra,
+                               struct Carta *sala,
+                               int *espaco_ocupado) {
+    int soma_monstros_restantes;
+    int i;
+
+    soma_monstros_restantes = 0;
+
+    for (i = 0; i < cartas_na_masmorra; i++) {
+        if (masmorra[i].tipo == TIPO_MONSTRO) {
+            soma_monstros_restantes += masmorra[i].valor;
+        }
+    }
+
+    for (i = 0; i < TAMANHO_SALA; i++) {
+        if (espaco_ocupado[i] && sala[i].tipo == TIPO_MONSTRO) {
+            soma_monstros_restantes += sala[i].valor;
+        }
+    }
+
+    return jogador.vida - soma_monstros_restantes;
+}
+
+/*
+ * Funcao: jogar_partida
+ * Uso: Controla o ciclo completo de uma partida: aloca memoria dinamica para a masmorra
+ *      e a sala, processa os turnos, aplica os efeitos das cartas (pocoes, armas e monstros),
+ *      gerencia a fuga de salas, verifica vitoria ou derrota e libera a memoria ao final.
+ */
+void jogar_partida(void) {
+    struct Carta *masmorra;
+    struct Carta *sala;
+    int *espaco_ocupado;
+
+    struct Carta carta_escolhida;
+    struct Jogador jogador;
+
+    int cartas_na_masmorra;
+    int cartas_na_sala;
+    int cartas_descartadas;
+    int cartas_enfrentadas_no_turno;
+    int pode_pular_sala;
+    int posicao_escolhida;
+    int pontuacao_final;
+    int vida_anterior;
+    int abandonou_partida;
+    char opcao_digitada;
+    int i;
+
+    masmorra = (struct Carta *)malloc(TOTAL_CARTAS * sizeof(struct Carta));
+    sala = (struct Carta *)malloc(TAMANHO_SALA * sizeof(struct Carta));
+    espaco_ocupado = (int *)malloc(TAMANHO_SALA * sizeof(int));
+
+    if (masmorra == NULL || sala == NULL || espaco_ocupado == NULL) {
+        printf("\nErro: memoria insuficiente para iniciar o jogo.\n");
+        free(masmorra);
+        free(sala);
+        free(espaco_ocupado);
+        return;
+    }
+
+    for (i = 0; i < TAMANHO_SALA; i++) {
+        espaco_ocupado[i] = 0;
+    }
+
+    jogador.vida = VIDA_MAXIMA;
+    jogador.arma_equipada = 0;
+    jogador.ultimo_monstro_derrotado = SEM_LIMITE_MONSTRO;
+    jogador.usou_pocao_no_turno = 0;
+    jogador.ultima_carta_jogada.naipe = 0;
+    jogador.ultima_carta_jogada.tipo = 0;
+    jogador.ultima_carta_jogada.valor = 0;
+
+    cartas_na_sala = 0;
+    cartas_descartadas = 0;
+    cartas_enfrentadas_no_turno = 0;
+    pode_pular_sala = 1;
+    abandonou_partida = 0;
+
+    cartas_na_masmorra = criar_baralho(masmorra);
+    embaralhar_baralho(masmorra, cartas_na_masmorra);
+
+    printf("\n=========================================================\n");
+    printf("            INICIANDO NOVA PARTIDA DE SCOUNDREL          \n");
+    printf("=========================================================\n");
+    printf("(Digite 'x' a qualquer momento para voltar ao Menu)\n");
+
+    while (jogador.vida > 0) {
+        if (cartas_enfrentadas_no_turno == 0) {
+            for (i = 0; i < TAMANHO_SALA && cartas_na_masmorra > 0; i++) {
+                if (!espaco_ocupado[i]) {
+                    sala[i] = masmorra[--cartas_na_masmorra];
+                    espaco_ocupado[i] = 1;
+                    cartas_na_sala++;
+                }
+            }
+        }
+
+        if (cartas_na_sala == 0 && cartas_na_masmorra == 0) {
+            printf("\n*** PARABENS! VOCE COMPLETOU TODA A MASMORRA! ***\n");
+            pontuacao_final = jogador.vida;
+            if (jogador.vida == VIDA_MAXIMA &&
+                jogador.ultima_carta_jogada.tipo == TIPO_POCAO) {
+                pontuacao_final += jogador.ultima_carta_jogada.valor;
+            }
+            printf("Pontuacao Final: %d\n\n", pontuacao_final);
+
+            free(masmorra);
+            free(sala);
+            free(espaco_ocupado);
+            return;
+        }
+
+        exibir_estado_e_sala(jogador, sala, espaco_ocupado,
+                             cartas_na_masmorra, cartas_descartadas);
+
+        printf("\nO que deseja fazer?\n");
+        printf(" (1-%d) Escolher uma carta da sala\n", TAMANHO_SALA);
+        if (pode_pular_sala && cartas_enfrentadas_no_turno == 0 &&
+            cartas_na_sala == TAMANHO_SALA) {
+            printf(" (f)   Fugir/Pular esta sala\n");
+        }
+        printf(" (x)   Abandonar partida e voltar ao Menu\n");
+
+        opcao_digitada = ler_opcao_teclado("\nSua escolha: ");
+
+        if (opcao_digitada == 'x' || opcao_digitada == '\0') {
+            printf("\nPartida abandonada.\n\n");
+            free(masmorra);
+            free(sala);
+            free(espaco_ocupado);
+            return;
+        }
+
+        if (opcao_digitada == 'f' && pode_pular_sala &&
+            cartas_enfrentadas_no_turno == 0 && cartas_na_sala == TAMANHO_SALA) {
+            printf("\nVoce pulou a sala! As cartas voltaram para o fundo da Masmorra.\n");
+            memmove(&masmorra[cartas_na_sala], &masmorra[0],
+                    (size_t)cartas_na_masmorra * sizeof(struct Carta));
+            memcpy(&masmorra[0], sala, (size_t)cartas_na_sala * sizeof(struct Carta));
+            cartas_na_masmorra += cartas_na_sala;
+
+            for (i = 0; i < TAMANHO_SALA; i++) {
+                espaco_ocupado[i] = 0;
+            }
+            cartas_na_sala = 0;
+            pode_pular_sala = 0;
+            continue;
+        }
+
+        if (opcao_digitada == 'f') {
+            if (!pode_pular_sala) {
+                printf("\nVoce nao pode pular duas salas seguidas!\n");
+            } else {
+                printf("\nVoce so pode pular a sala antes de enfrentar qualquer carta.\n");
+            }
+            continue;
+        }
+
+        posicao_escolhida = opcao_digitada - '1';
+        if (posicao_escolhida < 0 || posicao_escolhida >= TAMANHO_SALA) {
+            printf("\nOpcao invalida! Escolha um numero de 1 a %d.\n", TAMANHO_SALA);
+            continue;
+        }
+        if (!espaco_ocupado[posicao_escolhida]) {
+            printf("\nO espaco %d esta vazio! Escolha outra carta.\n", posicao_escolhida + 1);
+            continue;
+        }
+
+        carta_escolhida = sala[posicao_escolhida];
+        jogador.ultima_carta_jogada = carta_escolhida;
+
+        if (carta_escolhida.tipo == TIPO_POCAO) {
+            if (!jogador.usou_pocao_no_turno) {
+                vida_anterior = jogador.vida;
+                jogador.vida += carta_escolhida.valor;
+                if (jogador.vida > VIDA_MAXIMA) {
+                    jogador.vida = VIDA_MAXIMA;
+                }
+                jogador.usou_pocao_no_turno = 1;
+                printf("\nPocao bebida! Voce recuperou %d de vida. Vida atual: %d\n",
+                       jogador.vida - vida_anterior, jogador.vida);
+            } else {
+                printf("\nVoce ja bebeu uma pocao neste turno! Esta foi descartada sem efeito.\n");
+            }
+            cartas_descartadas++;
+        }
+        else if (carta_escolhida.tipo == TIPO_ARMA) {
+            jogador.arma_equipada = carta_escolhida.valor;
+            jogador.ultimo_monstro_derrotado = SEM_LIMITE_MONSTRO;
+            printf("\nNova arma equipada! Poder de ataque: %d\n", jogador.arma_equipada);
+            cartas_descartadas++;
+        }
+        else {
+            enfrentar_monstro(&jogador, carta_escolhida, &abandonou_partida);
+            if (abandonou_partida) {
+                printf("\nPartida abandonada.\n\n");
+                free(masmorra);
+                free(sala);
+                free(espaco_ocupado);
+                return;
+            }
+            cartas_descartadas++;
+        }
+
+        espaco_ocupado[posicao_escolhida] = 0;
+        cartas_na_sala--;
+        cartas_enfrentadas_no_turno++;
+
+        if (cartas_enfrentadas_no_turno == 3) {
+            cartas_enfrentadas_no_turno = 0;
+            jogador.usou_pocao_no_turno = 0;
+            pode_pular_sala = 1;
+            printf("\nTurno concluido! A carta restante permanece para a proxima sala.\n");
+        }
+    }
+
+    printf("\n=========================================================\n");
+    printf("                       VOCE MORREU!                      \n");
+    printf("=========================================================\n");
+
+    pontuacao_final = calcular_pontuacao_derrota(jogador, masmorra,
+                                                 cartas_na_masmorra, sala,
+                                                 espaco_ocupado);
+    printf("Pontuacao Final: %d\n\n", pontuacao_final);
+
+    free(masmorra);
+    free(sala);
+    free(espaco_ocupado);
 }
